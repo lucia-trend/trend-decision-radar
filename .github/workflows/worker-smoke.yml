@@ -54,7 +54,7 @@ jobs:
             return { status: response.status, json };
           };
           const registered = await post({ action: "authRegister", username, password });
-          if (registered.status !== 200 || !registered.json.token) throw new Error(`register:${registered.status}`);
+          if (registered.status !== 200 || !registered.json.token) throw new Error(`register:${registered.status}:${registered.json.error || "unknown"}`);
           const token = registered.json.token;
           const session = await post({ action: "authSession" }, token);
           const saved = await post({ action: "watchlistSave", items: [{ tmId: 123456, tickerName: "烟雾测试标的", tickerSymbol: "TEST" }] }, token);
