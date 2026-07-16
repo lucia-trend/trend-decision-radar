@@ -8,7 +8,7 @@ const ALLOWED_ORIGIN = "https://lucia-trend.github.io";
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const REGISTER_WINDOW_MS = 60 * 60 * 1000;
-const PBKDF2_ITERATIONS = 120_000;
+const PBKDF2_ITERATIONS = 100_000;
 const encoder = new TextEncoder();
 
 const CORS = {
