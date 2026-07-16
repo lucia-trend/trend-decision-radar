@@ -50,6 +50,13 @@ type Ticker = {
   asOfDate?: string;
 };
 
+type TrendApiResponse<T = unknown> = {
+  code?: string;
+  msg?: string;
+  success?: boolean;
+  data?: T;
+};
+
 class HttpError extends Error {
   constructor(
     message: string,
@@ -204,20 +211,66 @@ function sanitizeWatchlist(value: unknown) {
   return [...unique.values()];
 }
 
-async function call(name: string, params: Record<string, string> = {}) {
-  const key = process.env.TRENDTRADER_API_KEY;
-  if (!key) throw new Error("服务端尚未配置趋势动物 API Key");
+async function performCall(name: string, params: Record<string, string>, key: string) {
   const url = new URL(`${BASE}/${name}`);
   url.searchParams.set("apiKey", key);
   Object.entries(params).forEach(([param, value]) => url.searchParams.set(param, value));
   const res = await fetch(url, { cache: "no-store" });
-  const json = await res.json();
-  if (!res.ok || json.code !== "00000" || json.success === false) throw new Error(json.msg || `${name} 调用失败`);
-  return json;
+  let json: TrendApiResponse;
+  try {
+    json = await res.json() as TrendApiResponse;
+  } catch {
+    throw new Error(`${name} 返回了无法解析的响应`);
+  }
+  return { res, json };
+}
+
+function apiCallSucceeded(result: Awaited<ReturnType<typeof performCall>>) {
+  return result.res.ok && result.json.code === "00000" && result.json.success !== false;
+}
+
+async function accountBalance(key: string) {
+  try {
+    const result = await performCall("getAccountBalance", { viewLevel: "summary" }, key);
+    if (!apiCallSucceeded(result)) return null;
+    const data = result.json.data;
+    const account = Array.isArray(data) ? data[0] : data;
+    if (!account || typeof account !== "object") return null;
+    const balance = Number((account as Record<string, unknown>).balance);
+    return Number.isFinite(balance) ? balance : null;
+  } catch {
+    return null;
+  }
+}
+
+async function call<T = unknown>(name: string, params: Record<string, string> = {}, minimumKnownCost = 0): Promise<TrendApiResponse<T>> {
+  const primaryKey = process.env.TRENDTRADER_API_KEY;
+  const secondaryKey = process.env.TRENDTRADER_API_KEY_SECONDARY;
+  const defaultKey = primaryKey || secondaryKey;
+  if (!defaultKey) throw new Error("服务端尚未配置趋势动物 API Key");
+
+  let selectedKey = defaultKey;
+  if (primaryKey && secondaryKey && minimumKnownCost > 0) {
+    const balance = await accountBalance(primaryKey);
+    if (balance !== null && balance < minimumKnownCost) selectedKey = secondaryKey;
+  }
+
+  let result = await performCall(name, params, selectedKey);
+  if (apiCallSucceeded(result)) return result.json as TrendApiResponse<T>;
+
+  if (selectedKey === primaryKey && secondaryKey && minimumKnownCost > 0) {
+    const balance = await accountBalance(primaryKey);
+    if (balance !== null && balance < minimumKnownCost) {
+      result = await performCall(name, params, secondaryKey);
+      if (apiCallSucceeded(result)) return result.json as TrendApiResponse<T>;
+    }
+  }
+
+  throw new Error(result.json.msg || `${name} 调用失败`);
 }
 
 async function billing(fields: string[], rows: number) {
-  const response = await call("getSnapshotColumnBilling");
+  const response = await call<Array<{ columnName: string; priceCost: number }>>("getSnapshotColumnBilling");
   const prices = new Map<string, number>(
     (response.data || []).map((item: { columnName: string; priceCost: number }) => [item.columnName, Number(item.priceCost) || 0]),
   );
@@ -227,7 +280,7 @@ async function billing(fields: string[], rows: number) {
 async function snapshot(tmIds: number[], fields: string[]) {
   const estimatedCost = await billing(fields, tmIds.length);
   if (estimatedCost >= 1) throw new Error(`本轮预估快照费用 ¥${estimatedCost.toFixed(3)}，达到 1 元，已停止`);
-  const response = await call("getTickerSnapshot", { tmIds: tmIds.join(","), fields: fields.join(",") });
+  const response = await call<Array<Record<string, unknown>>>("getTickerSnapshot", { tmIds: tmIds.join(","), fields: fields.join(",") }, estimatedCost);
   return { data: response.data || [], estimatedCost };
 }
 
@@ -330,7 +383,7 @@ async function handle(req: NextRequest) {
     if (body.action === "search") {
       const keyword = String(body.keyword || "").trim().slice(0, 40);
       if (!keyword) throw new HttpError("请输入关键词");
-      const response = await call("searchTicker", { keyword });
+      const response = await call<Ticker[]>("searchTicker", { keyword }, 0.01);
       return NextResponse.json({ data: response.data, message: `找到 ${response.data?.length || 0} 个匹配品种` });
     }
 
@@ -377,7 +430,7 @@ async function handle(req: NextRequest) {
       const signal = String(body.signal);
       if (SIGNAL_TMIDS[signal]) {
         await call("getUpdateStatus");
-        const response = await call("getComponentTicker", { tmId: String(SIGNAL_TMIDS[signal]) });
+        const response = await call<Ticker[]>("getComponentTicker", { tmId: String(SIGNAL_TMIDS[signal]) }, 0.1);
         return NextResponse.json({ data: response.data || [], estimatedCost: 0.1 + (response.data?.length || 0) * 0.005, message: `已加载 ${signal} 官方组合` });
       }
       const flag: Record<string, string> = { 开香槟: "stopwinFlagByPopChampagne", 危险信号: "stopwinFlagByDangerSignal", 沸: "stopwinFlagByBoilingTemperature" };
@@ -389,7 +442,7 @@ async function handle(req: NextRequest) {
 
     if (body.action === "etfRanking") {
       await call("getUpdateStatus");
-      const components = await call("getComponentTicker", { tmId: "704614" });
+      const components = await call<Array<Record<string, unknown> & { tmId: number }>>("getComponentTicker", { tmId: "704614" }, 0.1);
       const ids = (components.data || []).map((item: { tmId: number }) => item.tmId).slice(0, 100);
       const result = await snapshot(ids, ["trendStrengthGlobalCurr", "trendTemperatureCurr", "isTrendRightSide", "return1d"]);
       result.data.sort((left: Record<string, unknown>, right: Record<string, unknown>) => Number(right.trendStrengthGlobalCurr || -1) - Number(left.trendStrengthGlobalCurr || -1));
@@ -407,14 +460,14 @@ async function handle(req: NextRequest) {
     if (body.action === "components") {
       const ticker = (body.ticker || {}) as Record<string, unknown>;
       await call("getUpdateStatus");
-      const response = await call("getComponentTicker", { tmId: String(ticker.tmId), ...(body.full ? { getAllBasicComponentsFlag: "1" } : {}) });
+      const response = await call<Array<Record<string, unknown> & { tmId: number }>>("getComponentTicker", { tmId: String(ticker.tmId), ...(body.full ? { getAllBasicComponentsFlag: "1" } : {}) }, 0.1);
       const rows = response.data || [];
       const perRow = ticker.assetCategory === "资产组合" ? 0.005 : 0.0002;
       const ids = rows.map((item: { tmId: number }) => item.tmId).slice(0, 100);
-      let data = rows;
+      let data: Array<Record<string, unknown>> = rows;
       if (ids.length) {
         const result = await snapshot(ids, ["trendStrengthGlobalCurr", "trendTemperatureCurr", "isTrendRightSide"]);
-        const statuses = new Map(result.data.map((item: { tmId: number }) => [item.tmId, item]));
+        const statuses = new Map(result.data.map((item) => [Number(item.tmId), item]));
         data = rows
           .map((item: Record<string, unknown>) => ({ ...item, ...(statuses.get(item.tmId as number) || {}) }))
           .sort((left: Record<string, unknown>, right: Record<string, unknown>) => Number(right.trendStrengthGlobalCurr || -1) - Number(left.trendStrengthGlobalCurr || -1));

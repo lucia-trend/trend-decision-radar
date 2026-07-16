@@ -15,6 +15,7 @@ https://lucia-trend.github.io/trend-decision-radar/
 ## 数据与安全
 
 - 趋势动物 API Key 仅保存在 Cloudflare Worker Secret，不进入前端或仓库。
+- 支持主备两个 API Key；付费调用前读取官方余额，主 Key 低于本次已知最低费用时才切换备用 Key。
 - Worker 限制 GitHub Pages 来源、请求类型和请求大小。
 - 密码采用带随机盐的 PBKDF2-SHA-256 摘要保存；服务端不保存明文密码。
 - 会话使用随机令牌，D1 只保存令牌摘要；登录失败和注册操作设有限流。
