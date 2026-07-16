@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 export const metadata: Metadata = {
-  metadataBase: new URL("https://trend-decision-console.luciaaqui.chatgpt.site"),
+  metadataBase: new URL("https://trend-decision-radar.luciaaqui.chatgpt.site"),
   title: "趋势决策台",
   description: "市场状态、纪律信号、ETF 强度与固定观察池",
   openGraph: { title: "趋势决策台", description: "今日趋势，先看事实再决策。", images: ["/og.png"] },
