@@ -2,6 +2,14 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "lucia-trend-api",
   "main": "dist/server/index.js",
-  "compatibility_date": "2026-07-16",
-  "compatibility_flags": ["nodejs_compat"]
+  "compatibility_date": "2026-05-22",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "lucia-trend-users",
+      "database_id": "8c7a1cad-b34b-4e4d-aa3e-654c89db41eb",
+      "migrations_dir": "drizzle"
+    }
+  ]
 }

@@ -38,3 +38,38 @@ jobs:
             'https://lucia-trend-api.lucia-trend.workers.dev/api/trend')"
           test "$status" = "200"
           node -e "const fs=require('fs'); const result=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + '/search.json','utf8')); if (!Array.isArray(result.data)) process.exit(1)"
+
+      - name: Verify account and watchlist lifecycle
+        run: |
+          node <<'NODE'
+          const endpoint = "https://lucia-trend-api.lucia-trend.workers.dev/api/trend";
+          const origin = "https://lucia-trend.github.io";
+          const username = `smoke${Date.now()}`.slice(0, 24);
+          const password = "PublicSmokeTest!2026";
+          const post = async (body, token) => {
+            const headers = { "content-type": "application/json", origin };
+            if (token) headers.authorization = `Bearer ${token}`;
+            const response = await fetch(endpoint, { method: "POST", headers, body: JSON.stringify(body) });
+            const json = await response.json();
+            return { status: response.status, json };
+          };
+          const registered = await post({ action: "authRegister", username, password });
+          if (registered.status !== 200 || !registered.json.token) throw new Error(`register:${registered.status}`);
+          const token = registered.json.token;
+          const session = await post({ action: "authSession" }, token);
+          const saved = await post({ action: "watchlistSave", items: [{ tmId: 123456, tickerName: "烟雾测试标的", tickerSymbol: "TEST" }] }, token);
+          const loaded = await post({ action: "watchlistGet" }, token);
+          const deleted = await post({ action: "authDelete", password }, token);
+          const revoked = await post({ action: "authSession" }, token);
+          const result = {
+            session: session.status,
+            save: saved.status,
+            load: loaded.status,
+            items: Array.isArray(loaded.json.data) ? loaded.json.data.length : -1,
+            delete: deleted.status,
+            revoked: revoked.status,
+          };
+          if (JSON.stringify(result) !== JSON.stringify({ session: 200, save: 200, load: 200, items: 1, delete: 200, revoked: 401 })) {
+            throw new Error(`account lifecycle failed: ${JSON.stringify(result)}`);
+          }
+          NODE
