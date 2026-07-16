@@ -1,0 +1,40 @@
+name: Verify Cloudflare Worker
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Accept the GitHub Pages origin
+        run: |
+          status="$(curl --silent --show-error --retry 2 --output /dev/null --write-out '%{http_code}' \
+            --request OPTIONS \
+            --header 'Origin: https://lucia-trend.github.io' \
+            --header 'Access-Control-Request-Method: POST' \
+            'https://lucia-trend-api.lucia-trend.workers.dev/api/trend')"
+          test "$status" = "204"
+
+      - name: Reject an unapproved origin
+        run: |
+          status="$(curl --silent --show-error --retry 2 --output /dev/null --write-out '%{http_code}' \
+            --request OPTIONS \
+            --header 'Origin: https://example.com' \
+            --header 'Access-Control-Request-Method: POST' \
+            'https://lucia-trend-api.lucia-trend.workers.dev/api/trend')"
+          test "$status" = "403"
+
+      - name: Verify a low-cost searchTicker request
+        run: |
+          status="$(curl --silent --show-error --retry 2 --output "$RUNNER_TEMP/search.json" --write-out '%{http_code}' \
+            --request POST \
+            --header 'Origin: https://lucia-trend.github.io' \
+            --header 'Content-Type: application/json' \
+            --data '{"action":"search","keyword":"AI ETF"}' \
+            'https://lucia-trend-api.lucia-trend.workers.dev/api/trend')"
+          test "$status" = "200"
+          node -e "const fs=require('fs'); const result=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + '/search.json','utf8')); if (!Array.isArray(result.data)) process.exit(1)"
