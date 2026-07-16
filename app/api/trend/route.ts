@@ -1,39 +1,17 @@
-import { NextRequest, NextResponse } from "next/server";
-
-const BASE = "https://www.trendtrader.cn/apiData/data";
-const allowedFields = new Set(["return1m","return3m","returnYTD","trendTemperatureCurr","trendPhaseCurr","trendStrengthGlobalCurr","daysSinceTrendEntry"]);
-
-async function call(name:string, params:Record<string,string>={}){
-  const apiKey=process.env.TRENDTRADER_API_KEY;
-  if(!apiKey) throw new Error("服务端尚未配置趋势动物 API Key");
-  const url=new URL(`${BASE}/${name}`); url.searchParams.set("apiKey",apiKey);
-  Object.entries(params).forEach(([k,v])=>url.searchParams.set(k,v));
-  const res=await fetch(url,{cache:"no-store"});
-  const json=await res.json();
-  if(!res.ok||json.code!=="00000"||json.success===false) throw new Error(json.msg||`${name} 调用失败`);
-  return json;
-}
-
-export async function POST(req:NextRequest){
-  try{
-    const body=await req.json();
-    if(body.action==="search"){
-      const keyword=String(body.keyword||"").trim().slice(0,40); if(!keyword) throw new Error("请输入搜索关键词");
-      const result=await call("searchTicker",{keyword}); return NextResponse.json({data:result.data});
-    }
-    if(body.action==="inspect"){
-      const tmIds=Array.isArray(body.tmIds)?body.tmIds.map(Number).filter(Number.isFinite).slice(0,20):[]; if(!tmIds.length) throw new Error("请选择至少一个品种");
-      const requested=Array.isArray(body.fields)?body.fields.filter((x:unknown)=>typeof x==="string"&&allowedFields.has(x)):[];
-      const [status,billing]=await Promise.all([call("getUpdateStatus"),call("getSnapshotColumnBilling")]);
-      const billMap=new Map((billing.data||[]).map((x:{columnName:string;priceCost:number})=>[x.columnName,Number(x.priceCost)||0]));
-      const estimatedCost=requested.reduce((sum:number,k:string)=>sum+(billMap.get(k)||0),0)*tmIds.length;
-      if(estimatedCost>=1) throw new Error(`本轮预估费用 ¥${estimatedCost.toFixed(3)}，达到 1 元，已按规范停止，请缩小范围`);
-      const snapshot=await call("getTickerSnapshot",{tmIds:tmIds.join(","),fields:requested.join(",")});
-      const targetAssets=new Set((snapshot.data||[]).map((x:{asset?:string})=>x.asset).filter(Boolean));
-      const matched=(status.data||[]).filter((x:{asset?:string})=>targetAssets.has(x.asset));
-      const latest=matched.sort((a:{updateDt?:string},b:{updateDt?:string})=>String(b.updateDt||"").localeCompare(String(a.updateDt||"")))[0]||null;
-      return NextResponse.json({data:snapshot.data,status:latest,estimatedCost,fields:requested});
-    }
-    return NextResponse.json({error:"不支持的操作"},{status:400});
-  }catch(error){return NextResponse.json({error:error instanceof Error?error.message:"服务异常"},{status:500});}
-}
+import {NextRequest,NextResponse} from "next/server";
+const BASE="https://www.trendtrader.cn/apiData/data";
+const ALLOWED=new Set(["return1m","return3m","returnYTD","trendTemperatureCurr","isTrendRightSide","trendStrengthGlobalCurr","trendPhaseCurr","stopwinFlagByDangerSignal","stopwinFlagByBoilingTemperature","stopwinFlagByPopChampagne"]);
+const SIGNAL_TMIDS:Record<string,number>={"大暑":624513,"小暑":624512,"温转热":624503,"温转平":624571,"平转凉":683734};
+async function call(name:string,params:Record<string,string>={}){const key=process.env.TRENDTRADER_API_KEY;if(!key)throw new Error("服务端尚未配置趋势动物 API Key");const url=new URL(`${BASE}/${name}`);url.searchParams.set("apiKey",key);Object.entries(params).forEach(([k,v])=>url.searchParams.set(k,v));const res=await fetch(url,{cache:"no-store"});const json=await res.json();if(!res.ok||json.code!=="00000"||json.success===false)throw new Error(json.msg||`${name} 调用失败`);return json}
+async function billing(fields:string[],rows:number){const b=await call("getSnapshotColumnBilling");const map=new Map((b.data||[]).map((x:{columnName:string;priceCost:number})=>[x.columnName,Number(x.priceCost)||0]));return fields.reduce((s,k)=>s+(map.get(k)||0),0)*rows}
+async function snapshot(tmIds:number[],fields:string[]){const cost=await billing(fields,tmIds.length);if(cost>=1)throw new Error(`本轮预估快照费用 ¥${cost.toFixed(3)}，达到 1 元，已停止`);const j=await call("getTickerSnapshot",{tmIds:tmIds.join(","),fields:fields.join(",")});return{data:j.data||[],estimatedCost:cost}}
+export async function POST(req:NextRequest){try{const b=await req.json();
+ if(b.action==="search"){const keyword=String(b.keyword||"").trim().slice(0,40);if(!keyword)throw new Error("请输入关键词");const j=await call("searchTicker",{keyword});return NextResponse.json({data:j.data,message:`找到 ${j.data?.length||0} 个匹配品种`})}
+ if(b.action==="overview"){await call("getUpdateStatus");const ids=[303121,377042,332171,327801];const fields=["trendTemperatureCurr","trendStrengthGlobalCurr","isTrendRightSide","return1d","return1m","Op","Hi","Lo","Cl"];const s=await snapshot(ids,fields);const market=s.data.find((x:Record<string,unknown>)=>x.asset==="A股")||{};const clamp=(n:number)=>Math.max(0,Math.min(100,n));const tempScore:Record<string,number>={"冻":5,"寒":18,"凉":32,"平":48,"温":62,"热":80,"沸":95};const strength=Number(market.trendStrengthGlobalCurr||50);const r1m=Number(market.return1m||0);const fearGreed=Math.round(clamp((tempScore[String(market.trendTemperatureCurr)]??50)*.4+strength*.4+clamp(50+r1m*500)*.2));const op=Number(market.Op),hi=Number(market.Hi),lo=Number(market.Lo),cl=Number(market.Cl),r1d=Number(market.return1d);const prev=cl&&Number.isFinite(r1d)?cl/(1+r1d):0;const gap=prev?op/prev-1:NaN;const highOpen=Number.isFinite(gap)?Math.round(clamp(50+gap*1000)):null;const range=hi-lo;const walk=op&&range>0?((cl-op)/range):NaN;const highWalk=Number.isFinite(walk)?Math.round(clamp(50+walk*50)):null;const zone=(n:number|null)=>n===null?"数据不足":n>=75?"偏强":n>=55?"中性偏强":n>=45?"中性":n>=25?"中性偏弱":"偏弱";const derived={"恐贪指数":{value:fearGreed,label:zone(fearGreed),formula:"40% 趋势温度映射 + 40% 全局趋势相对强度 + 20% 近1月回报动量（回报按 ±10% 映射到 0–100），结果截断在 0–100。样本为 A股资产大类。"},"高开指数":{value:highOpen,label:zone(highOpen),formula:"先用 收盘价 ÷ (1 + 日回报) 反推前收，再计算开盘跳空率；0% 对应 50 分，每 +1% 增加 10 分，截断在 0–100。样本为 A股资产大类。"},"高走指数":{value:highWalk,label:zone(highWalk),formula:"50 + 50 × (收盘价 − 开盘价) ÷ (最高价 − 最低价)，截断在 0–100；衡量收盘相对开盘及日内区间的位置。样本为 A股资产大类。"}};return NextResponse.json({...s,data:s.data,derived,message:"市场状态已同步；三项自建指数均为策略推导，不是 API 直接字段"})}
+ if(b.action==="inspect"){const ids=Array.isArray(b.tmIds)?b.tmIds.map(Number).filter(Number.isFinite).slice(0,20):[];if(!ids.length)throw new Error("观察池为空");const fields=(Array.isArray(b.fields)?b.fields:[]).filter((x:string)=>ALLOWED.has(x));const s=await snapshot(ids,fields);return NextResponse.json({...s,message:`已巡检 ${s.data.length} 个固定观察标的`})}
+ if(b.action==="signal"){const signal=String(b.signal);if(SIGNAL_TMIDS[signal]){await call("getUpdateStatus");const j=await call("getComponentTicker",{tmId:String(SIGNAL_TMIDS[signal])});return NextResponse.json({data:j.data||[],estimatedCost:.1+(j.data?.length||0)*.005,message:`已加载 ${signal} 官方组合`})}const flag:Record<string,string>={"开香槟":"stopwinFlagByPopChampagne","危险信号":"stopwinFlagByDangerSignal","沸":"stopwinFlagByBoilingTemperature"};const ids=Array.isArray(b.watchTmIds)?b.watchTmIds.map(Number).filter(Number.isFinite).slice(0,20):[];if(!ids.length)return NextResponse.json({data:[],message:"该信号需先建立固定观察池"});const s=await snapshot(ids,[flag[signal]]);return NextResponse.json({...s,data:s.data.filter((x:Record<string,unknown>)=>x[flag[signal]]===true),message:`已在固定观察池筛选 ${signal}`})}
+ if(b.action==="etfRanking"){await call("getUpdateStatus");const c=await call("getComponentTicker",{tmId:"704614"});const ids=(c.data||[]).map((x:{tmId:number})=>x.tmId).slice(0,100);const s=await snapshot(ids,["trendStrengthGlobalCurr","trendTemperatureCurr","isTrendRightSide","return1d"]);s.data.sort((a:Record<string,unknown>,z:Record<string,unknown>)=>Number(z.trendStrengthGlobalCurr||-1)-Number(a.trendStrengthGlobalCurr||-1));return NextResponse.json({...s,estimatedCost:s.estimatedCost+.1+(c.data?.length||0)*.005,message:`已排序 ${s.data.length} 只趋势龙头 ETF`})}
+ if(b.action==="componentEstimate"){const t=b.ticker||{};const s=await snapshot([Number(t.tmId)],["constituentCount"]);const count=Number(s.data[0]?.constituentCount||0);const perRow=t.assetCategory==="资产组合"?.005:.0002;return NextResponse.json({estimatedCost:.1+count*perRow,count,message:count?"基于 constituentCount 估算":"文档未提供可用成分数，实际行数不确定"})}
+ if(b.action==="components"){const t=b.ticker||{};await call("getUpdateStatus");const j=await call("getComponentTicker",{tmId:String(t.tmId),...(b.full?{getAllBasicComponentsFlag:"1"}:{})});const rows=j.data||[];const perRow=t.assetCategory==="资产组合"?.005:.0002;const ids=rows.map((x:{tmId:number})=>x.tmId).slice(0,100);let data=rows;if(ids.length){const s=await snapshot(ids,["trendStrengthGlobalCurr","trendTemperatureCurr","isTrendRightSide"]);const map=new Map(s.data.map((x:{tmId:number})=>[x.tmId,x]));data=rows.map((x:Record<string,unknown>)=>({...x,...(map.get(x.tmId as number)||{})})).sort((a:Record<string,unknown>,z:Record<string,unknown>)=>Number(z.trendStrengthGlobalCurr||-1)-Number(a.trendStrengthGlobalCurr||-1))}return NextResponse.json({data,estimatedCost:.1+rows.length*perRow,message:`返回 ${rows.length} 个成分；前 ${ids.length} 个已补充趋势状态`})}
+ return NextResponse.json({error:"不支持的操作"},{status:400});
+ }catch(e){return NextResponse.json({error:e instanceof Error?e.message:"服务异常"},{status:500})}}
